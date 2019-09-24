@@ -40,6 +40,13 @@ typedef struct
 	char		types[1024];
 } LinebufType;
 
+typedef struct
+{
+	int			border;
+	char		linestyle;
+	char		separator;
+} ConfigType;
+
 static void *
 smalloc(int size, char *debugstr)
 {
@@ -48,6 +55,8 @@ smalloc(int size, char *debugstr)
 	result = malloc(size);
 	if (!result)
 		exit(1);
+
+	return result;
 }
 
 static void
@@ -116,13 +125,14 @@ main(int argc, char *argv[])
 
 	LinebufType	linebuf;
 	RowBucketType	rowbucket, *current;
+	ConfigType		config;
+
 	bool	skip_initial;
 	int		c;
 	int		first_nw = 0;
 	int		last_nw = 0;
 	int		pos = 0;
 	int		printed_rows = 0;
-	int		separator = -1;
 	int		instr = false;
 
 	setlocale(LC_ALL, "");
@@ -137,6 +147,11 @@ main(int argc, char *argv[])
 	/* for debug purposes */
 	memset(linebuf.buffer, 0, 1024);
 
+	config.separator = -1;
+	config.linestyle = 'a';
+	config.border = 2;
+
+
 	rowbucket.nrows = 0;
 	rowbucket.allocated = false;
 	rowbucket.next_bucket = NULL;
@@ -148,8 +163,6 @@ main(int argc, char *argv[])
 	c = fgetc(ifile);
 	while (c != EOF)
 	{
-		bool	already_counted = false;
-
 		if (c != '\n' || instr)
 		{
 			int		l;
@@ -200,21 +213,21 @@ main(int argc, char *argv[])
 				pos = pos + 1;
 			}
 
-			if (separator == -1 && !instr)
+			if (config.separator == -1 && !instr)
 			{
 				/*
 				 * Automatic separator detection - now it is very simple, first win.
 				 * Can be enhanced in future by more sofisticated mechanism.
 				 */
 				if (c == ',')
-					separator = ',';
+					config.separator = ',';
 				else if (c == ';')
-					separator = ';';
+					config.separator = ';';
 				else if (c == '|')
-					separator = '|';
+					config.separator = '|';
 			}
 
-			if (separator != -1 && c == separator && !instr)
+			if (config.separator != -1 && c == config.separator && !instr)
 			{
 				if (!skip_initial)
 				{
