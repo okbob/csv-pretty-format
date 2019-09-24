@@ -60,24 +60,104 @@ smalloc(int size, char *debugstr)
 }
 
 static void
-print_vertical_header(LinebufType *linebuf)
+print_vertical_header(FILE *ofile, LinebufType *linebuf, ConfigType *config, char pos)
 {
 	int		i;
+	int		border = config->border;
 
-	printf("+-");
-
-	for (i = 0; i < linebuf->maxfields; i++)
+	if (config->linestyle == 'a')
 	{
-		int		j;
+		if ((border == 0 || border == 1) && (pos != 'm'))
+			return;
 
-		if (i > 0)
-			printf("-+-");
+		if (border == 2)
+			fprintf(ofile, "+-");
+		else if (border == 1)
+			fprintf(ofile, "-");
 
-		for (j = 0; j < linebuf->widths[i]; j++)
-			printf("-");
+		for (i = 0; i < linebuf->maxfields; i++)
+		{
+			int		j;
+
+			if (i > 0)
+			{
+				if (border == 0)
+					fprintf(ofile, " ");
+				else
+					fprintf(ofile, "-+-");
+			}
+
+			for (j = 0; j < linebuf->widths[i]; j++)
+				fprintf(ofile, "-");
+		}
+
+		if (border == 2)
+			fprintf(ofile, "-+");
+		else if (border == 1)
+			fprintf(ofile, "-");
+
+		fprintf(ofile, "\n");
 	}
+	else if (config->linestyle == 'u')
+	{
+		if ((border == 0 || border == 1) && (pos != 'm'))
+			return;
 
-	printf("-+\n");
+		if (border == 2)
+		{
+			if (pos == 't')
+				fprintf(ofile, "\342\224\214");
+			else if (pos == 'm')
+				fprintf(ofile, "\342\224\234");
+			else
+				fprintf(ofile, "\342\224\224");
+
+			fprintf(ofile, "\342\224\200");
+		}
+		else if (border == 1)
+			fprintf(ofile, "\342\224\200");
+
+		for (i = 0; i < linebuf->maxfields; i++)
+		{
+			int		j;
+
+			if (i > 0)
+			{
+				if (border == 0)
+					fprintf(ofile, " ");
+				else
+				{
+					fprintf(ofile, "\342\224\200");
+					if (pos == 't')
+						fprintf(ofile, "\342\224\254");
+					else if (pos == 'm')
+						fprintf(ofile, "\342\224\274");
+					else
+						fprintf(ofile, "\342\224\264");
+
+					fprintf(ofile, "\342\224\200");
+				}
+			}
+
+			for (j = 0; j < linebuf->widths[i]; j++)
+				fprintf(ofile, "\342\224\200");
+		}
+
+		if (border == 2)
+		{
+			fprintf(ofile, "\342\224\200");
+			if (pos == 't')
+				fprintf(ofile, "\342\224\220");
+			else if (pos == 'm')
+				fprintf(ofile, "\342\224\244");
+			else
+				fprintf(ofile, "\342\224\230");
+		}
+		else if (border == 1)
+			fprintf(ofile, "\342\224\200");
+
+		fprintf(ofile, "\n");
+	}
 }
 
 /*
@@ -148,9 +228,8 @@ main(int argc, char *argv[])
 	memset(linebuf.buffer, 0, 1024);
 
 	config.separator = -1;
-	config.linestyle = 'a';
+	config.linestyle = 'u';
 	config.border = 2;
-
 
 	rowbucket.nrows = 0;
 	rowbucket.allocated = false;
@@ -355,7 +434,7 @@ next_char:
 
 	current = &rowbucket;
 
-	print_vertical_header(&linebuf);
+	print_vertical_header(ofile, &linebuf, &config, 't');
 
 	while (current)
 	{
@@ -366,7 +445,15 @@ next_char:
 			int		j;
 			bool	isheader = false;
 
-			printf("| ");
+			if (config.border == 2)
+			{
+				if (config.linestyle == 'a')
+					fprintf(ofile, "| ");
+				else
+					fprintf(ofile, "\342\224\202 ");
+			}
+			else if (config.border == 1)
+				fprintf(ofile, " ");
 
 			isheader = printed_rows == 0 ? is_header(&rowbucket) : false;
 
@@ -377,7 +464,17 @@ next_char:
 				char   *field = current->rows[i]->fields[j];
 
 				if (j > 0)
-					printf(" | ");
+				{
+					if (config.border == 0)
+						fprintf(ofile, " ");
+					else
+					{
+						if (config.linestyle == 'a')
+							fprintf(ofile, " | ");
+						else
+							fprintf(ofile, " \342\224\202 ");
+					}
+				}
 
 				if (*field != '\0')
 				{
@@ -408,15 +505,35 @@ next_char:
 			for (j = current->rows[i]->nfields; j < linebuf.maxfields; j++)
 			{
 				if (j > 0)
-					printf(" | ");
+				{
+					if (config.border == 0)
+						fprintf(ofile, " ");
+					else
+					{
+						if (config.linestyle == 'a')
+							fprintf(ofile, " | ");
+						else
+							fprintf(ofile, " \342\224\202 ");
+					}
+				}
 
 				printf("%*s", linebuf.widths[j], "");
 			}
 
-			printf(" |\n");
+			if (config.border == 2)
+			{
+				if (config.linestyle == 'a')
+					fprintf(ofile, " |");
+				else
+					fprintf(ofile, " \342\224\202");
+			}
+			else if (config.border == 1)
+				fprintf(ofile, " ");
+
+			fprintf(ofile, "\n");
 
 			if (isheader)
-				print_vertical_header(&linebuf);
+				print_vertical_header(ofile, &linebuf, &config, 'm');
 
 			printed_rows += 1;
 		}
@@ -424,5 +541,5 @@ next_char:
 		current = current->next_bucket;
 	}
 
-	print_vertical_header(&linebuf);
+	print_vertical_header(ofile, &linebuf, &config, 'b');
 }
