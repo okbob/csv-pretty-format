@@ -122,6 +122,8 @@ main(int argc, char *argv[])
 	int		last_nw = 0;
 	int		pos = 0;
 	int		printed_rows = 0;
+	int		separator = -1;
+	int		instr = false;
 
 	setlocale(LC_ALL, "");
 
@@ -148,7 +150,7 @@ main(int argc, char *argv[])
 	{
 		bool	already_counted = false;
 
-		if (c != '\n')
+		if (c != '\n' || instr)
 		{
 			int		l;
 
@@ -170,10 +172,49 @@ main(int argc, char *argv[])
 				memset(linebuf.buffer + linebuf.used, 0, linebuf.size - linebuf.used);
 			}
 
-			linebuf.buffer[linebuf.used++] = c;
-			pos = pos + 1;
+			if (c == '"')
+			{
+				if (instr)
+				{
+					int     c2 = fgetc(ifile);
 
-			if (c == ',')
+					if (c2 == '"')
+					{
+						/* double double quotes */
+						linebuf.buffer[linebuf.used++] = c;
+						pos = pos + 1;
+					}
+					else
+					{
+						/* start of end of string */
+						ungetc(c2, ifile);
+						instr = false;
+					}
+				}
+				else
+					instr = true;
+			}
+			else
+			{
+				linebuf.buffer[linebuf.used++] = c;
+				pos = pos + 1;
+			}
+
+			if (separator == -1 && !instr)
+			{
+				/*
+				 * Automatic separator detection - now it is very simple, first win.
+				 * Can be enhanced in future by more sofisticated mechanism.
+				 */
+				if (c == ',')
+					separator = ',';
+				else if (c == ';')
+					separator = ';';
+				else if (c == '|')
+					separator = '|';
+			}
+
+			if (separator != -1 && c == separator && !instr)
 			{
 				if (!skip_initial)
 				{
@@ -189,7 +230,7 @@ main(int argc, char *argv[])
 				skip_initial = true;
 				first_nw = pos;
 			}
-			else if (c != ' ')
+			else if (instr || c != ' ')
 			{
 				last_nw = pos;
 			}
@@ -224,7 +265,7 @@ main(int argc, char *argv[])
 
 			if (!skip_initial)
 			{
-				linebuf.sizes[linebuf.nfields] = last_nw - first_nw + 1;
+				linebuf.sizes[linebuf.nfields] = last_nw - first_nw;
 				linebuf.starts[linebuf.nfields++] = first_nw;
 			}
 			else
@@ -298,9 +339,6 @@ next_char:
 
 		c = fgetc(ifile);
 	}
-
-
-	printf("processed rows: %d\n", linebuf.processed);
 
 	current = &rowbucket;
 
