@@ -349,6 +349,46 @@ utf_string_dsplen(const char *s, size_t max_bytes)
 	return result;
 }
 
+int
+utf_string_dsplen_multiline(const char *s, size_t max_bytes, bool *multiline, bool first_only)
+{
+	int result = -1;
+	int		rowlen = 0;
+	const char *ptr = s;
+
+	*multiline = false;
+
+	while (*ptr != '\0' && (max_bytes == -1 || max_bytes > 0))
+	{
+		int		clen;
+
+		if (*ptr == '\n')
+		{
+			*multiline = true;
+
+			result = rowlen > result ? rowlen : result;
+			max_bytes -= max_bytes > 0 ? 1 : 0;
+
+			rowlen = 0;
+			ptr += 1;
+
+			if (first_only)
+				break;
+
+			continue;
+		}
+
+		clen = utf8charlen(*ptr);
+		rowlen += utf_dsplen(ptr);
+		ptr += clen;
+		if (max_bytes > 0)
+			max_bytes -= clen;
+	}
+
+	return result != -1 ? result : rowlen;
+}
+
+
 /*
  * This version of previous function uses similar calculation like
  * readline libarry - and supports terminal tabs.

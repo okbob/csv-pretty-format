@@ -22,6 +22,7 @@ typedef struct _rowBucketType
 {
 	int			nrows;
 	RowType	   *rows[1000];
+	bool		multilines[1000];
 	bool		allocated;
 	struct _rowBucketType *next_bucket;
 } RowBucketType;
@@ -34,10 +35,10 @@ typedef struct
 	int			size;
 	int			nfields;
 	int			maxfields;
-	int			starts[1024];
-	int			sizes[1024];
-	int			widths[1024];
-	char		types[1024];
+	int			starts[1024];		/* start of first char of column (in bytes) */
+	int			sizes[1024];		/* lenght of chars of column (in bytes) */
+	int			widths[1024];		/* display width of column */
+	char		multilines[1024];		/* true, when column has some multiline chars */
 } LinebufType;
 
 typedef struct
@@ -95,6 +96,8 @@ print_vertical_header(FILE *ofile, LinebufType *linebuf, ConfigType *config, cha
 			fprintf(ofile, "-+");
 		else if (border == 1)
 			fprintf(ofile, "-");
+		else if (border == 0 && linebuf->multilines[linebuf->maxfields - 1])
+			fputc(' ', ofile);
 
 		fprintf(ofile, "\n");
 	}
@@ -196,6 +199,37 @@ is_header(RowBucketType *rb)
 	return false;
 }
 
+static char *
+fput_line(char *str, bool multiline, FILE *ofile)
+{
+	char   *nextline = NULL;
+
+	if (multiline)
+	{
+		char   *ptr = str;
+		int		size = 0;
+		int		chrl;
+
+		while (*ptr)
+		{
+			if (*ptr == '\n')
+			{
+				nextline = ptr + 1;
+				break;
+			}
+
+			chrl = utf8charlen(*ptr);
+			size += chrl;
+			ptr += chrl;
+		}
+
+		fwrite(str, 1, size, ofile);
+	}
+	else
+		fputs(str, ofile);
+
+	return nextline;
+}
 
 int
 main(int argc, char *argv[])
@@ -208,12 +242,17 @@ main(int argc, char *argv[])
 	ConfigType		config;
 
 	bool	skip_initial;
+	bool	closed = false;
+	bool	printed_headline = false;
 	int		c;
 	int		first_nw = 0;
 	int		last_nw = 0;
 	int		pos = 0;
 	int		printed_rows = 0;
 	int		instr = false;
+
+	bool	last_multiline_column;
+	int		last_column;
 
 	setlocale(LC_ALL, "");
 
@@ -228,8 +267,8 @@ main(int argc, char *argv[])
 	memset(linebuf.buffer, 0, 1024);
 
 	config.separator = -1;
-	config.linestyle = 'u';
-	config.border = 2;
+	config.linestyle = 'a';
+	config.border = 0;
 
 	rowbucket.nrows = 0;
 	rowbucket.allocated = false;
@@ -240,9 +279,9 @@ main(int argc, char *argv[])
 	skip_initial = true;
 
 	c = fgetc(ifile);
-	while (c != EOF)
+	do
 	{
-		if (c != '\n' || instr)
+		if (c != EOF && (c != '\n' || instr))
 		{
 			int		l;
 
@@ -354,6 +393,7 @@ main(int argc, char *argv[])
 			RowType	   *row;
 			int			i;
 			int			data_size;
+			bool		multiline;
 
 			if (!skip_initial)
 			{
@@ -392,9 +432,12 @@ main(int argc, char *argv[])
 			row = smalloc(offsetof(RowType, fields) + (linebuf.nfields * sizeof(char*)), "RowType");
 			row->nfields = linebuf.nfields;
 
+			multiline = false;
+
 			for (i = 0; i < linebuf.nfields; i++)
 			{
 				int		width;
+				bool	_multiline;
 
 				row->fields[i] = locbuf;
 
@@ -404,14 +447,18 @@ main(int argc, char *argv[])
 				locbuf[linebuf.sizes[i]] = '\0';
 				locbuf += linebuf.sizes[i] + 1;
 
-				width = utf_string_dsplen(row->fields[i], linebuf.sizes[i]);
+				width = utf_string_dsplen_multiline(row->fields[i], linebuf.sizes[i], &_multiline, false);
 				if (width > linebuf.widths[i])
 					linebuf.widths[i] = width;
+
+				multiline |= _multiline;
+				linebuf.multilines[i] |= _multiline;
 			}
 
 			if (linebuf.nfields > linebuf.maxfields)
 				linebuf.maxfields = linebuf.nfields;
 
+			current->multilines[current->nrows] = multiline;
 			current->rows[current->nrows++] = row;
 
 next_row:
@@ -425,16 +472,22 @@ next_row:
 			first_nw = 0;
 			last_nw = 0;
 			pos = 0;
+
+			closed = c == EOF;
 		}
 
 next_char:
 
 		c = fgetc(ifile);
 	}
+	while (!closed);
 
 	current = &rowbucket;
 
 	print_vertical_header(ofile, &linebuf, &config, 't');
+
+	last_multiline_column = linebuf.multilines[linebuf.maxfields - 1];
+	last_column = linebuf.maxfields - 1;
 
 	while (current)
 	{
@@ -444,102 +497,163 @@ next_char:
 		{
 			int		j;
 			bool	isheader = false;
+			RowType	   *row;
+			bool	free_row;
+			bool	more_lines = true;
+			bool	multiline = current->multilines[i];
 
-			if (config.border == 2)
+			/*
+			 * For multilines we can modify pointers so do copy now
+			 */
+			if (multiline)
 			{
-				if (config.linestyle == 'a')
-					fprintf(ofile, "| ");
-				else
-					fprintf(ofile, "\342\224\202 ");
+				RowType	   *source = current->rows[i];
+				int			size;
+
+				size = offsetof(RowType, fields) + (source->nfields * sizeof(char*));
+
+				row = smalloc(size, "RowType");
+				memcpy(row, source, size);
+
+				free_row = true;
 			}
-			else if (config.border == 1)
-				fprintf(ofile, " ");
-
-			isheader = printed_rows == 0 ? is_header(&rowbucket) : false;
-
-			for (j = 0; j < current->rows[i]->nfields; j++)
+			else
 			{
-				int		width;
-				int		spaces;
-				char   *field = current->rows[i]->fields[j];
+				row = current->rows[i];
+				free_row = false;
+			}
 
-				if (j > 0)
+			while (more_lines)
+			{
+				more_lines = false;
+
+				if (config.border == 2)
 				{
-					if (config.border == 0)
-						fprintf(ofile, " ");
+					if (config.linestyle == 'a')
+						fprintf(ofile, "| ");
 					else
+						fprintf(ofile, "\342\224\202 ");
+				}
+				else if (config.border == 1)
+					fprintf(ofile, " ");
+
+				isheader = printed_rows == 0 ? is_header(&rowbucket) : false;
+
+				for (j = 0; j < row->nfields; j++)
+				{
+					int		width;
+					int		spaces;
+					char   *field;
+					bool	_more_lines = false;
+
+					if (j > 0)
+					{
+						if (config.border != 0)
+						{
+							if (config.linestyle == 'a')
+								fprintf(ofile, "| ");
+							else
+								fprintf(ofile, "\342\224\202 ");
+						}
+					}
+
+					field = row->fields[j];
+
+					if (field && *field != '\0')
+					{
+						bool	_isdigit = isdigit(field[0]);
+
+						if (multiline)
+						{
+							width = utf_string_dsplen_multiline(field, -1, &_more_lines, true);
+							more_lines |= _more_lines;
+						}
+						else
+							width = utf_string_dsplen(field, -1);
+
+						spaces = linebuf.widths[j] - width;
+
+						/* left spaces */
+						if (isheader)
+							printf("%*s", spaces / 2, "");
+						else if (_isdigit)
+							printf("%*s", spaces, "");
+
+						if (multiline)
+							row->fields[j] = fput_line(row->fields[j], multiline, ofile);
+						else
+							(void) fput_line(row->fields[j], multiline, ofile);
+
+						/* right spaces */
+						if (isheader)
+							printf("%*s", spaces - (spaces / 2), "");
+						else if (!_isdigit)
+							printf("%*s", spaces, "");
+					}
+					else
+						printf("%*s", linebuf.widths[j], "");
+
+					if (_more_lines)
 					{
 						if (config.linestyle == 'a')
-							fprintf(ofile, " | ");
+							fputc('+', ofile);
 						else
-							fprintf(ofile, " \342\224\202 ");
-					}
-				}
-
-				if (*field != '\0')
-				{
-					width = utf_string_dsplen(field, -1);
-					spaces = linebuf.widths[j] - width;
-
-					if (isheader)
-					{
-						printf("%*s", spaces / 2, "");
-						printf("%s", field);
-						printf("%*s", spaces - (spaces / 2), "");
-					}
-					else if (isdigit(field[0]))
-					{
-						printf("%*s", spaces, "");
-						printf("%s", field);
+							fputs("\342\206\265", ofile);
 					}
 					else
 					{
-						printf("%s", field);
-						printf("%*s", spaces, "");
+						if (config.border != 0 || j < last_column || last_multiline_column)
+							fputc(' ', ofile);
 					}
 				}
-				else
-					printf("%*s", linebuf.widths[j], "");
-			}
 
-			for (j = current->rows[i]->nfields; j < linebuf.maxfields; j++)
-			{
-				if (j > 0)
+				for (j = row->nfields; j < linebuf.maxfields; j++)
 				{
-					if (config.border == 0)
-						fprintf(ofile, " ");
-					else
+					bool	addspace;
+
+					if (j > 0)
 					{
-						if (config.linestyle == 'a')
-							fprintf(ofile, " | ");
-						else
-							fprintf(ofile, " \342\224\202 ");
+						if (config.border != 0)
+						{
+							if (config.linestyle == 'a')
+								fprintf(ofile, "| ");
+							else
+								fprintf(ofile, "\342\224\202 ");
+						}
 					}
+
+					addspace = config.border != 0 || j < last_column || last_multiline_column;
+
+					fprintf(ofile, "%*s", linebuf.widths[j] + (addspace ? 1 : 0), "");
 				}
 
-				printf("%*s", linebuf.widths[j], "");
+				if (config.border == 2)
+				{
+					if (config.linestyle == 'a')
+						fprintf(ofile, "|");
+					else
+						fprintf(ofile, "\342\224\202");
+				}
+
+				fprintf(ofile, "\n");
+
+				if (isheader)
+				{
+					print_vertical_header(ofile, &linebuf, &config, 'm');
+					printed_headline = true;
+				}
+
+				printed_rows += 1;
 			}
 
-			if (config.border == 2)
-			{
-				if (config.linestyle == 'a')
-					fprintf(ofile, " |");
-				else
-					fprintf(ofile, " \342\224\202");
-			}
-			else if (config.border == 1)
-				fprintf(ofile, " ");
-
-			fprintf(ofile, "\n");
-
-			if (isheader)
-				print_vertical_header(ofile, &linebuf, &config, 'm');
-
-			printed_rows += 1;
+			if (free_row)
+				free(row);
 		}
 
 		current = current->next_bucket;
 	}
 
 	print_vertical_header(ofile, &linebuf, &config, 'b');
+
+	fprintf(ofile, "(%d rows)\n", linebuf.processed - (printed_headline ? 1 : 0));
 }
